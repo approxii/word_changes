@@ -1,6 +1,7 @@
 import json
 from docx import Document
 from docx.oxml.ns import qn
+import os
 from docx.oxml import OxmlElement
 
 
@@ -60,7 +61,7 @@ class BookmarkExtractor:
             })
 
         output_data = {
-            "краткая информация": self.templates  # Список всех шаблонов с массивами
+            "blocks": self.templates  # Список всех шаблонов с массивами
         }
         self.save_to_json(output_data, json_file)
 
@@ -91,12 +92,138 @@ class BookmarkExtractor:
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
+
+class DocxFiller:
+    def __init__(self, docx_file, json_path, original_path):
+        self.docx_file = docx_file
+        self.json_path = json_path
+        self.current_block = {}
+        self.original_path = original_path
+        self.original_folder = os.path.dirname(original_path)
+
+    def load_json(self):
+        #загрузка json'а
+        with open(self.json_path, 'r', encoding='utf-8') as file:
+            self.data = json.load(file)
+
+    def update(self):
+        #функция прохода по элементам документа и замены/добавления текста в местах закладок
+        self.load_json()
+
+        result_doc = Document()
+
+        #проход по всем элементам(включая таблицы и тд)
+        for index, block in enumerate(self.data['blocks']):
+            doc, temp_filename = self.copy_to_temp(index)
+            for key, value in block.items():
+                print(f"Обработка блока {index}, ключ: {key}, значение: {value}")
+                bookmark_found = False
+                for element in doc.element.body.iter():
+                    if element.tag == qn('w:bookmarkStart'):  # тег закладок для поиска в списке xml
+                        bookmark_name = element.get(qn('w:name'))
+                        if bookmark_name == key:
+                            print(f"Закладка найдена: {bookmark_name}, текст для замены: {value}")
+                            self.replace_text(doc, element, value)
+                            bookmark_found = True
+                if not bookmark_found:
+                    print(f"Закладки в документе не найдены")
+
+            doc.save(temp_filename)
+            self.add_temp_to_original(result_doc, temp_filename)
+
+            #удаление временных файлов
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
+
+        result_doc.save('result.docx')
+        return result_doc
+
+    def copy_to_temp(self, index):
+        #функция копирования данных во временные файлы
+        temp_filename = f'temp{index}.docx'
+        original_doc = Document(self.docx_file)
+        original_doc.save(temp_filename)
+        return original_doc, temp_filename
+
+    def add_temp_to_original(self, original_doc, temp_doc_path):
+        #функция комбинирования временного файла с результатом
+        temp_doc = Document(temp_doc_path)
+
+        elements_to_copy = list(temp_doc.element.body)
+        paragraph_index = 0
+        table_index = 0
+
+        for element in elements_to_copy:
+            if element.tag.endswith('p'):
+                if paragraph_index < len(temp_doc.paragraphs):
+                    paragraph = temp_doc.paragraphs[paragraph_index]
+                    self.copy_paragraph(paragraph, original_doc)
+                    paragraph_index += 1
+            elif element.tag.endswith('tbl'):
+                if table_index < len(temp_doc.tables):
+                    table = temp_doc.tables[table_index]
+
+                    new_table = original_doc.add_table(rows=len(table.rows), cols=len(table.columns))
+                    new_table.style = table.style
+
+                    for row_index, row in enumerate(table.rows):
+                        for col_index, cell in enumerate(row.cells):
+                            new_table.cell(row_index, col_index).text = cell.text
+
+                            tcPr = new_table.cell(row_index, col_index)._tc.get_or_add_tcPr()
+                            tcBorders = OxmlElement("w:tcBorders")
+                            for border in ["top", "left", "bottom", "right"]:
+                                element = OxmlElement(f"w:{border}")
+                                element.set(qn("w:val"), "single")
+                                element.set(qn("w:sz"), "4")
+                                element.set(qn("w:space"), "0")
+                                element.set(qn("w:color"), "auto")
+                                tcBorders.append(element)
+                            tcPr.append(tcBorders)
+
+                    table_index += 1
+
+        original_doc.add_page_break()
+
+
+    def replace_text(self, doc, bookmark_element, new_text):
+        #функция замены текста закладки на новый текст из json
+        for sibling in bookmark_element.itersiblings():
+            if sibling.tag == qn('w:r'):
+                for child in sibling.iter():
+                    if child.tag == qn('w:t'):
+                        print(f"Изменили: {child.text} на {new_text}")
+                        child.text = new_text
+                        return
+
+
+    def copy_paragraph(self, paragraph, document):
+        #ункция для копирования абзаца в новый документ
+        new_paragraph = document.add_paragraph()
+        new_paragraph.style = paragraph.style  #стиль абзаца
+        for run in paragraph.runs:
+            new_run = new_paragraph.add_run(run.text)  #текст
+            new_run.bold = run.bold  #жирность
+            new_run.italic = run.italic  #курсив
+            new_run.font.size = run.font.size  #размер шрифта
+            if run.font.color and run.font.color.rgb:
+                new_run.font.color.rgb = run.font.color.rgb  #цвет шрифта(если есть)
+
+
+
+
 #main функция для тестов
 def main():
-    docx_file = 'C:/Users/approxii/Desktop/word pravki/ext.docx' #изменить путь используя os
-    json_file = 'C:/Users/approxii/Desktop/word pravki/bookmarks.json' #изменить путь используя os
+    docx_file = 'ext.docx'  #изменить путь используя os
+    json_file = 'bookmarks.json'  #изменить путь используя os
 
     extractor = BookmarkExtractor(docx_file)
     extractor.extract_and_save_bookmarks(json_file)
+
+    doc = 'example.docx'
+    json_path = 'data.json'
+
+    doc_filler = DocxFiller(doc, json_path, doc)
+    doc_filler.update()
 
 main()
