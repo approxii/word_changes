@@ -3,7 +3,6 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import os
-
 from core.services.base import BaseDocumentService
 
 
@@ -25,20 +24,48 @@ class WordService(BaseDocumentService):
         for index, block in enumerate(params['blocks']):
             doc, temp_filename = self.copy_to_temp(index)
             for key, value in block.items():
-                print(f"Обработка блока {index}, ключ: {key}, значение: {value}")
                 bookmark_found = False
-                for element in doc.element.body.iter():
-                    if element.tag == qn('w:bookmarkStart'):  # тег закладок для поиска в списке xml
-                        bookmark_name = element.get(qn('w:name'))
-                        if bookmark_name == key:
-                            #print(f"Закладка найдена: {bookmark_name}, текст для замены: {value}")
+                if isinstance(value, str):
+                    for element in doc.element.body.iter():
+                        #print(element.tag)
+                        if element.tag == qn('w:bookmarkStart'):  # тег закладок для поиска в списке xml
+                            bookmark_name = element.get(qn('w:name'))
+                            if bookmark_name == key:
+                                self.replace_text(doc, element, value)
+                                bookmark_found = True
+                    if not bookmark_found:
+                        print(f"Закладка {key} в документе не найдена")
+                elif isinstance(value, list):
+                    for table in doc.tables:
+                        for row in table.rows:
+                            for cell in row.cells:
+                                bookmark_element = self.find_bookmark_in_table(cell, key)
+                                if bookmark_element != None:
+                                    cell.text = value[0]
+                                    bookmark_found = True
+                                    start_index = None
+                                    for idx, c in enumerate(row.cells):
+                                        if c.text == cell.text:
+                                            start_index = idx
+                                            break
 
+                                    if start_index is not None:
+                                        for i, val in enumerate(value[1:], start=1):
+                                            if start_index + i < len(row.cells):
+                                                row.cells[start_index + i].text = val
 
-                            self.replace_text(doc, element, value)
-                            bookmark_found = True
-                if not bookmark_found:
-                    print(f"Закладки в документе не найдены")
-            
+                                    break
+
+                            if bookmark_found:
+                                break
+                        if bookmark_found:
+                            break
+
+                    if not bookmark_found:
+                        print(f"Закладка '{key}' не найдена в документе.")
+                    else:
+                        print(f"Закладка '{key}' успешно обработана.")
+
             doc.save(temp_filename)
             self.add_temp_to_original(result_doc, temp_filename, params, index)
 
@@ -50,15 +77,26 @@ class WordService(BaseDocumentService):
             last_paragraph = result_doc.paragraphs[-1]
             p = last_paragraph._element
             p.getparent().remove(p)
-            #result_doc = self.kludgy_remove_last_page(result_doc)
+
         self.docx_file = result_doc
+
+    def find_bookmark_in_table(self, cell, bookmark_name):
+        for paragraph in cell.paragraphs:
+            for element in paragraph._element.iter():
+                if element.tag == qn('w:bookmarkStart'):
+                    if element.get(qn('w:name')) == bookmark_name:
+                        return element  #возвращаем элемент закладки
+        return None  #если закладка не найдена
 
     def copy_to_temp(self, index):
         #функция копирования данных во временные файлы
         temp_filename = f'temp{index}.docx'
-        original_doc = self.docx_file
-        original_doc.save(temp_filename)
-        return original_doc, temp_filename
+
+        self.docx_file.save(temp_filename)
+
+        new_doc = Document(temp_filename)
+
+        return new_doc, temp_filename
 
     def add_temp_to_original(self, original_doc, temp_doc_path, params: dict, index):
         #функция комбинирования временного файла с результатом
@@ -99,18 +137,27 @@ class WordService(BaseDocumentService):
                     table_index += 1
         if params['newpage'] == 'true':
             original_doc.add_page_break()
-        
-
 
     def replace_text(self, doc, bookmark_element, new_text):
-        #функция замены текста закладки на новый текст из json
+        parent_element = bookmark_element.getparent()
+
         for sibling in bookmark_element.itersiblings():
             if sibling.tag == qn('w:r'):
-                for child in sibling.iter():
-                    if child.tag == qn('w:t'):
-                        #print(f"Изменили: {child.text} на {new_text}")
-                        child.text = new_text
+                text_elements = sibling.findall(qn('w:t'))
+
+                if text_elements:
+                    for child in text_elements:
+                        child.text = new_text  # Замена на новый текст
                         return
+
+        new_run = OxmlElement('w:r')
+        new_text_element = OxmlElement('w:t')
+        new_text_element.text = new_text
+
+        new_run.append(new_text_element)
+        parent_element.insert(parent_element.index(bookmark_element), new_run)
+        parent_element.remove(bookmark_element)
+
 
 
     def copy_paragraph(self, paragraph, document):
